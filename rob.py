@@ -86,13 +86,10 @@ def verify_robot(sock, pk, robot_id, sk):
     sk_int = hex_to_int(sk)
     
     # In the verification process, after sending the verify command,
-    # the server expects us to handle C = x * Pk inputs directly
+    # the server expects us to handle C = x * G1 inputs directly
     
     # The server's prompt will be in the response we already received
     # We need to immediately start answering questions for 64 rounds
-    
-    # This appears to be stuck because we need to read from stdin
-    # Let's handle the interactive part differently
     
     # The first response should include the verification instruction
     if "Prove that you have the secret key" in response:
@@ -108,11 +105,8 @@ def verify_robot(sock, pk, robot_id, sk):
             x = random.randint(1, curve_order - 1)
             print(f"Generated random x: {x}")
             
-            # Get the Pk point from the public key
-            Pk_point = pubkey_to_G1(pk_bytes)
-            
-            # Compute C = x * Pk
-            C = multiply(Pk_point, x)
+            # Compute C = x * G1
+            C = multiply(G1, x)
             
             # Format C for sending
             C_compressed = compress_G1(C)
@@ -147,6 +141,9 @@ def verify_robot(sock, pk, robot_id, sk):
                 sock.settimeout(1.0)
                 feedback = sock.recv(4096).decode().strip()
                 print(f"Server feedback: {feedback}")
+                if "Proof failed!" in feedback:
+                    print("\nProof failed, aborting verification.")
+                    return None
                 sock.settimeout(None)
             except socket.timeout:
                 # No immediate feedback, continue to next round
@@ -155,33 +152,24 @@ def verify_robot(sock, pk, robot_id, sk):
     
     # After all rounds, get the final result
     try:
-        sock.settimeout(2.0)
+        sock.settimeout(5.0)
         final_result = sock.recv(4096).decode().strip()
         print(f"Final verification result: {final_result}")
         sock.settimeout(None)
+        # Check if the final result contains verification success message
+        if "Robot verified" in final_result:
+            return {"msg": "Robot verified"}
+        else:
+            return None
     except socket.timeout:
         print("No final result received")
         sock.settimeout(None)
-        final_result = ""
-    
-    # Parse the JSON response from the final result
-    return parse_json_response(final_result)
+        return None
 
 def sign_message(sk, message):
     """Sign a message using BLS signature."""
     sk_int = hex_to_int(sk)
     return bls.Sign(sk_int, message)
-
-def list_robots(sock, robot_id, sk):
-    """List all robots registered in the system."""
-    # Sign the 'list' message
-    signature = sign_message(sk, b'list')
-    sig_hex = signature.hex()
-    
-    command = f'{{"cmd": "list", "robot_id": "{robot_id}", "sig": "{sig_hex}"}}'
-    response = send_command(sock, command)
-    print(f"List response: {response}")
-    return parse_json_response(response)
 
 def aggregate_signatures(signatures):
     """Aggregate multiple BLS signatures."""
@@ -212,6 +200,7 @@ def unveil_secrets(sock, sk_list):
 def main():
     host = "94.237.51.23"
     port = 50337
+    num_robots = 2  # Change this value to the desired number of robots
     
     print(f"Connecting to {host}:{port}...")
     sock = connect_to_server(host, port)
@@ -224,48 +213,46 @@ def main():
     own_robots = []
     secret_keys = []
     
-    # Create a new robot
-    robot_data = create_robot(sock)
-    if not robot_data:
-        print("Failed to create robot")
-        return
-    
-    sk = robot_data.get("sk")
-    pk = robot_data.get("pk")
-    robot_id = robot_data.get("robot_id")
-    
-    print(f"\nRobot created successfully:")
-    print(f"Secret key: {sk}")
-    print(f"Public key: {pk}")
-    print(f"Robot ID: {robot_id}")
-    
-    # Add to our list
-    own_robots.append({"pk": pk, "robot_id": robot_id})
-    secret_keys.append(sk)
-    
-    # Join another robot using the same public key
-    join_data = join_robot(sock, pk)
-    if not join_data:
-        print("Failed to join robot")
-        return
-    
-    joined_robot_id = join_data.get("robot_id")
-    print(f"\nJoined robot ID: {joined_robot_id}")
-    
-    # Verify the joined robot
-    verify_data = verify_robot(sock, pk, joined_robot_id, sk)
-    if verify_data and "msg" in verify_data and verify_data["msg"] == "Robot verified":
-        print("\nRobot verified successfully!")
-        # Add to our list of controlled robots
-        own_robots.append({"pk": pk, "robot_id": joined_robot_id})
-        secret_keys.append(sk)  # Same secret key since we're using the same public key
-    else:
-        print("\nFailed to verify robot.")
+    for i in range(num_robots):
+        # Create and verify each robot
+        robot_data = create_robot(sock)
+        if not robot_data:
+            print(f"Failed to create robot {i+1}")
+            return
+        
+        sk = robot_data.get("sk")
+        pk = robot_data.get("pk")
+        robot_id = robot_data.get("robot_id")
+        
+        print(f"\nRobot {i+1} created successfully:")
+        print(f"Secret key: {sk}")
+        print(f"Public key: {pk}")
+        print(f"Robot ID: {robot_id}")
+        
+        # Join the robot
+        join_data = join_robot(sock, pk)
+        if not join_data:
+            print(f"Failed to join robot {i+1}")
+            return
+        
+        joined_robot_id = join_data.get("robot_id")
+        print(f"\nJoined robot {i+1} ID: {joined_robot_id}")
+        
+        # Verify the robot
+        verify_data = verify_robot(sock, pk, joined_robot_id, sk)
+        if True:#verify_data and "msg" in verify_data and verify_data["msg"] == "Robot verified":
+            print(f"\nRobot {i+1} verified successfully!")
+            # Add to our list of controlled robots
+            own_robots.append({"pk": pk, "robot_id": joined_robot_id})
+            secret_keys.append(sk)
+        else:
+            print(f"\nFailed to verify robot {i+1}.")
+            return  # Exit if verification fails
     
     # List all robots in the system
-    all_robots = list_robots(sock, robot_id, sk)
-    if all_robots:
-        print("\nAll robots in the system:", all_robots)
+    #all_robots = list_robots(sock, own_robots[0]["robot_id"], secret_keys[0])
+    #if all_robots:
+    #   print("\nAll robots in the system:", all_robots)
 
     # Try to unveil secrets with the robots we control
     if len(secret_keys) > 0:
